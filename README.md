@@ -36,3 +36,14 @@ npm run dev
 ```
 
 The frontend expects the backend at `http://localhost:8000` by default.
+
+Environment variables (OpenAI API key)
+
+- Create a `.env` file inside the `backend` folder (copy `backend/.env.example`).
+- Add your OpenAI API key there:
+
+```
+OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
+```
+
+The Django settings will load `backend/.env` automatically when `python-dotenv` is installed.
