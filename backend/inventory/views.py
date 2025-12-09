@@ -13,6 +13,7 @@ from .serializers import ProductCaptureSerializer
 import csv
 from django.utils import timezone
 import io
+from django.core.files.base import ContentFile
 
 class ProductExtractView(APIView):
     parser_classes = (MultiPartParser, FormParser)
@@ -20,16 +21,26 @@ class ProductExtractView(APIView):
     def post(self, request, format=None):
         image_file = request.FILES.get('image')
         session_id = request.data.get('session_id', 'default')
-        
+
         if not image_file:
             return Response({'error': 'No image provided'}, status=400)
-        
-        # Perform OCR
-        image = Image.open(image_file)
-        ocr_text = pytesseract.image_to_string(image)
-        
-        # Prepare image for GPT
-        image_data = base64.b64encode(image_file.read()).decode('utf-8')
+
+        # Read uploaded file into bytes once and reuse (prevents EOF/file-pointer issues)
+        try:
+            image_bytes = image_file.read()
+        except Exception:
+            return Response({'error': 'Failed to read uploaded image'}, status=400)
+
+        # Perform OCR using PIL from bytes
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes))
+        except Exception as e:
+            return Response({'error': f'Invalid image file: {e}'}, status=400)
+
+        ocr_text = pytesseract.image_to_string(pil_image)
+
+        # Prepare image for GPT (base64 from same bytes)
+        image_data = base64.b64encode(image_bytes).decode('utf-8')
         
         # Call GPT Vision API
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -79,9 +90,11 @@ class ProductExtractView(APIView):
             json_str = content[json_start:json_end]
             extracted_data = json.loads(json_str)
             
-            # Save to database
+            # Save to database. Use ContentFile to attach the bytes to the ImageField
+            image_name = getattr(image_file, 'name', None) or f'capture_{timezone.now().strftime("%Y%m%d%H%M%S")}.jpg'
+            content_file = ContentFile(image_bytes, name=image_name)
+
             product_capture = ProductCapture(
-                image=image_file,
                 product_name=extracted_data.get('product_name', ''),
                 unit=extracted_data.get('unit', ''),
                 description=extracted_data.get('description', ''),
@@ -89,6 +102,8 @@ class ProductExtractView(APIView):
                 confidence=extracted_data.get('confidence', 0.0),
                 session_id=session_id
             )
+            # assign file to image field and save
+            product_capture.image.save(content_file.name, content_file, save=False)
             product_capture.save()
             
             serializer = ProductCaptureSerializer(product_capture)
