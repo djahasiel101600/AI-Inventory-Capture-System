@@ -3,9 +3,11 @@ import pytesseract
 from PIL import Image
 from django.http import HttpResponse, JsonResponse
 from django.conf import settings
+from django.db.models import Count, Max
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
+from rest_framework.renderers import JSONRenderer
 from openai import OpenAI
 import json
 from .models import ProductCapture
@@ -61,7 +63,7 @@ class ProductExtractView(APIView):
                                 - product_name
                                 - unit (e.g., "500g", "1L", "12pcs")
                                 - description (short text)
-                                - category (Food, Medicine, Drinks, Hygiene, Insecticide, Cleanings)
+                                - category (Food, Medicine, Drinks, Hygiene, Insecticide, Cleanings, School Supplies, Office Supplies, Tobacco, Alcohol, Bread & Pastries, Baby Products, Pet Supplies, Hardware & Electrical, Clothing & Accessories, Mobile Load & E-Services, Rice & Grains)
                                 - confidence (0 to 1, estimate based on clarity and completeness)
                                 
                                 OCR Text: {ocr_text}
@@ -159,6 +161,39 @@ class SessionProductsView(APIView):
         serializer = ProductCaptureSerializer(products, many=True)
         return Response(serializer.data)
 
+from django.shortcuts import get_object_or_404
+from django.core.files.uploadedfile import UploadedFile
+
+class ProductDetailView(APIView):
+    renderer_classes = [JSONRenderer]
+    
+    def get_object(self, pk):
+        return get_object_or_404(ProductCapture, pk=pk)
+    
+    def put(self, request, pk):
+        product = self.get_object(pk)
+        # Make a mutable copy of incoming data so we can sanitize it.
+        data = request.data.copy()
+
+        # If the client sent an `image` field but it's not an uploaded file
+        # (e.g. a URL or a JSON string), remove it so the ImageField
+        # validation does not raise "The submitted data was not a file".
+        img = data.get('image', None)
+        if img and not isinstance(img, UploadedFile):
+            data.pop('image', None)
+
+        serializer = ProductCaptureSerializer(product, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        # Return validation errors (helpful for debugging client 400s)
+        return Response(serializer.errors, status=400)
+    
+    def delete(self, request, pk):
+        product = self.get_object(pk)
+        product.delete()
+        return Response({'message': 'Product deleted successfully'}, status=204)
+
 class ClearSessionView(APIView):
     def delete(self, request):
         session_id = request.query_params.get('session_id')
@@ -167,3 +202,27 @@ class ClearSessionView(APIView):
         
         deleted_count, _ = ProductCapture.objects.filter(session_id=session_id).delete()
         return Response({'deleted': deleted_count})
+    
+
+
+class SessionsListView(APIView):
+    """Return a list of sessions with counts and last seen timestamp."""
+    def get(self, request):
+        sessions = (
+            ProductCapture.objects
+            .values('session_id')
+            .annotate(count=Count('id'), last_seen=Max('created_at'))
+            .order_by('-last_seen')
+        )
+
+        # Normalize session_id (empty strings -> 'default')
+        result = [
+            {
+                'session_id': s['session_id'] or 'default',
+                'count': s['count'],
+                'last_seen': s['last_seen'],
+            }
+            for s in sessions
+        ]
+
+        return Response(result)
