@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ai-inventory-backend:latest
+    restart: unless-stopped
+    environment:
+      - DEBUG=False
+      - ALLOWED_HOSTS=*
+    volumes:
+      - static_volume:/app/backend/staticfiles
+      - media_volume:/app/backend/media
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: ai-inventory-frontend:latest
+    restart: unless-stopped
+    ports:
+      - '3002:80'
+    depends_on:
+      - backend
+
+volumes:
+  static_volume:
+  media_volume:
