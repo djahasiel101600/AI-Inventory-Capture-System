@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {CameraCapture} from './components/CameraCapture';
 import { ProductForm } from './components/ProductForm';
 import { ProductList } from './components/ProductList';
+import { HistoryPage } from './components/HistoryPage';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from './components/ui/button';
@@ -36,7 +37,7 @@ function App() {
       
       if (data.confidence >= 0.85) {
         // Auto-accept high confidence results
-        handleSave(data);
+        await handleSave(data);
       }
     } catch (error) {
       console.error('Extraction error:', error);
@@ -46,19 +47,52 @@ function App() {
     }
   }, [sessionId]);
 
+  // Load existing session products on mount so history persists across reloads
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const existing = await api.getSessionProducts(sessionId);
+        if (mounted) setProducts(existing);
+      } catch (e) {
+        console.warn('Could not load session products:', e);
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, [sessionId]);
+
   const handleSave = async (productData: ExtractionResponse) => {
     try {
-      const newProduct: ProductCapture = {
-        ...productData,
-        id: productData.id || `product_${Date.now()}`,
-        image_url: '', // Would be filled from backend response
-        created_at: new Date().toISOString(),
-      };
+      // If the product already exists on the server (has an id), PATCH it
+      let savedProduct: ProductCapture;
+      if (productData.id) {
+        savedProduct = await api.updateProduct(productData.id, productData);
+      } else {
+        // Fallback: if there's no id, just add the client-side object
+        savedProduct = {
+          ...productData,
+          id: productData.id || `product_${Date.now()}`,
+          image_url: productData.image_url || '',
+          created_at: productData.created_at || new Date().toISOString(),
+        } as ProductCapture;
+      }
 
-      setProducts(prev => [...prev, newProduct]);
+      setProducts(prev => {
+        // replace if exists, else append
+        const idx = prev.findIndex(p => p.id === savedProduct.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = savedProduct;
+          return copy;
+        }
+        return [...prev, savedProduct];
+      });
+
       setExtractedData(null);
       showAlert('success', 'Product saved successfully!');
     } catch (error) {
+      console.error('Save error:', error);
       showAlert('error', 'Failed to save product.');
     }
   };
@@ -112,9 +146,10 @@ function App() {
         )}
 
         <Tabs defaultValue="capture" className="space-y-6">
-          <TabsList className="grid w-full max-w-md mx-auto grid-cols-2">
+            <TabsList className="grid w-full max-w-md mx-auto grid-cols-3">
             <TabsTrigger value="capture">Capture Products</TabsTrigger>
             <TabsTrigger value="review">Review ({products.length})</TabsTrigger>
+            <TabsTrigger value="history">History</TabsTrigger>
           </TabsList>
 
           <TabsContent value="capture" className="space-y-6">
@@ -149,6 +184,16 @@ function App() {
               onRemove={handleRemove}
             />
           </TabsContent>
+
+            <TabsContent value="history">
+              <HistoryPage 
+                sessionId={sessionId}
+                onProductUpdate={(updatedProducts) => {
+                  // Sync with your main products state if needed
+                  setProducts(updatedProducts);
+                }}
+              />
+            </TabsContent>
         </Tabs>
 
         <footer className="mt-12 pt-8 border-t text-center text-gray-500 text-sm">

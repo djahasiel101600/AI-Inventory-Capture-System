@@ -40,3 +40,18 @@ export interface Session {
   created_at: string;
   product_count: number;
 }
+
+// Add this type for the API response
+export interface ApiResponse<T> {
+  data: T;
+  message?: string;
+  status: number;
+}
+
+export interface SessionStats {
+  total: number;
+  highConfidence: number;
+  lowConfidence: number;
+  avgConfidence: string;
+  categories: Record<string, number>;
+}
