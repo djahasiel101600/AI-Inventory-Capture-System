@@ -7,9 +7,10 @@ interface ProductListProps {
   products: ProductCapture[];
   onExport: () => void;
   onRemove: (id: string) => void;
+  onEdit?: (product: ProductCapture) => void;
 }
 
-export function ProductList({ products, onExport, onRemove }: ProductListProps) {
+export function ProductList({ products, onExport, onRemove, onEdit }: ProductListProps) {
   return (
     <Card className="w-full max-w-4xl mx-auto">
       <CardHeader>
@@ -41,14 +42,26 @@ export function ProductList({ products, onExport, onRemove }: ProductListProps) 
                       </h4>
                       <p className="text-sm text-gray-600">{product.unit}</p>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onRemove(product.id)}
-                      className="h-8 w-8 p-0"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      {onEdit && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onEdit(product)}
+                          className="h-8 w-8 p-0"
+                        >
+                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => onRemove(product.id)}
+                        className="h-8 w-8 p-0"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
                   
                   <p className="text-sm text-gray-700 line-clamp-2">

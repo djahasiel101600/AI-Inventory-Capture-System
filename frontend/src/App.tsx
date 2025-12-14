@@ -6,6 +6,8 @@ import { HistoryPage } from './components/HistoryPage';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from './components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { AlertCircle, CheckCircle } from 'lucide-react';
 import type { ExtractionResponse, ProductCapture } from './types/product';
 import { api } from './lib/api';
@@ -14,7 +16,12 @@ import { ConnectionStatus } from './components/ConnectionsStatus';
 function App() {
   const [products, setProducts] = useState<ProductCapture[]>([]);
   const [extractedData, setExtractedData] = useState<ExtractionResponse | null>(null);
+  // queue of low-confidence items to review one-by-one
+  const [reviewQueue, setReviewQueue] = useState<ExtractionResponse[]>([]);
+  const [showReviewAll, setShowReviewAll] = useState(false);
+  const [editableQueue, setEditableQueue] = useState<ExtractionResponse[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<import('./types/product').ProductCapture | null>(null);
   const [sessionId] = useState(() => `session_${Date.now()}`);
   const [alert, setAlert] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
@@ -28,19 +35,36 @@ function App() {
     setAlert(null);
 
     try {
-      const data = await api.extractProduct({
+      const items = await api.extractProduct({
         image: imageBlob,
-        session_id: sessionId
+        session_id: sessionId,
+        max_items: 10,
       });
-      
-      setExtractedData(data);
-      
-      if (data.confidence >= 0.85) {
-        // Auto-accept high confidence results
-        await handleSave(data);
+
+      if (Array.isArray(items) && items.length > 0) {
+        const autoSaved = items.filter((it) => it.confidence >= 0.85);
+        const needReview = items.filter((it) => it.confidence < 0.85);
+
+        if (autoSaved.length > 0) {
+          setProducts((prev) => [...prev, ...autoSaved]);
+          showAlert('success', `Auto-saved ${autoSaved.length} item(s)`);
+        }
+
+        if (needReview.length > 0) {
+          // Enqueue low-confidence items and show the first one
+          setReviewQueue(needReview);
+          setExtractedData(needReview[0]);
+          showAlert('error', `Detected ${needReview.length} item(s) needing review`);
+          // Prepare editable queue when multiple items need review
+          if (needReview.length > 1) {
+            setEditableQueue(needReview);
+          }
+        }
+      } else {
+        showAlert('error', 'No items detected.');
       }
-    } catch (error) {
-      console.error('Extraction error:', error);
+    } catch (err) {
+      console.error('Extraction error:', err);
       showAlert('error', 'Failed to extract product information. Please try again.');
     } finally {
       setIsProcessing(false);
@@ -89,6 +113,8 @@ function App() {
         return [...prev, savedProduct];
       });
 
+      // Remove the saved item from review queue if present
+      setReviewQueue((q) => q.filter((it) => it.id !== savedProduct.id));
       setExtractedData(null);
       showAlert('success', 'Product saved successfully!');
     } catch (error) {
@@ -97,10 +123,29 @@ function App() {
     }
   };
 
+  const nextReview = () => {
+    setReviewQueue((q) => {
+      const next = q.slice(1);
+      setExtractedData(next.length > 0 ? next[0] : null);
+      return next;
+    });
+  };
+
+  const skipReview = () => {
+    // Discard current and advance
+    nextReview();
+  };
+
+  const handleSaveFromReview = async (data: ExtractionResponse) => {
+    await handleSave(data);
+    // After saving, advance to next review item
+    nextReview();
+  };
+
   const handleExport = async () => {
     try {
       const csvUrl = await api.exportCSV(sessionId);
-      
+
       // Trigger download
       const link = document.createElement('a');
       link.href = csvUrl;
@@ -108,7 +153,7 @@ function App() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
+
       showAlert('success', 'CSV exported successfully!');
     } catch (error) {
       showAlert('error', 'Failed to export CSV.');
@@ -117,6 +162,11 @@ function App() {
 
   const handleRemove = (id: string) => {
     setProducts(prev => prev.filter(product => product.id !== id));
+  };
+
+  const handleEdit = (product: import('./types/product').ProductCapture) => {
+    // Open modal with product pre-filled
+    setEditingProduct(product);
   };
 
   return (
@@ -155,18 +205,18 @@ function App() {
           <TabsContent value="capture" className="space-y-6">
             {extractedData && extractedData.confidence < 0.85 ? (
               <>
+                <div className="max-w-2xl mx-auto">
+                  <div className="mb-2 text-sm text-gray-600">Reviewing {reviewQueue.length} item(s) — item {reviewQueue.findIndex(i => i.id === extractedData.id) + 1} of {reviewQueue.length}</div>
+                </div>
                 <ProductForm
                   extractedData={extractedData}
-                  onSubmit={handleSave}
-                  onCancel={() => setExtractedData(null)}
+                  onSubmit={handleSaveFromReview}
+                  onCancel={() => { setExtractedData(null); setReviewQueue([]); }}
                 />
-                <div className="text-center">
-                  <Button
-                    variant="outline"
-                    onClick={() => setExtractedData(null)}
-                  >
-                    Back to Camera
-                  </Button>
+                <div className="text-center flex items-center justify-center gap-3">
+                  <Button variant="outline" onClick={skipReview}>Skip</Button>
+                  <Button variant="secondary" onClick={() => setShowReviewAll(true)} disabled={reviewQueue.length <= 1}>Review All</Button>
+                  <Button variant="ghost" onClick={() => { setExtractedData(null); setReviewQueue([]); setEditableQueue([]); }}>Cancel Review</Button>
                 </div>
               </>
             ) : (
@@ -177,13 +227,102 @@ function App() {
             )}
           </TabsContent>
 
+          {/* Review All modal / panel */}
+          {showReviewAll && (
+            <div className="fixed inset-0 z-50 flex items-start justify-center p-6 bg-black/40">
+              <div className="bg-white rounded-lg w-full max-w-4xl max-h-[85vh] overflow-y-auto p-6">
+                <h3 className="text-lg font-semibold mb-4">Review All ({editableQueue.length} items)</h3>
+                <div className="space-y-4">
+                  {editableQueue.map((item, idx) => (
+                    <div key={item.id || idx} className="border p-4 rounded">
+                      <div className="flex justify-between items-center mb-2">
+                        <div className="font-medium">Item {idx + 1}</div>
+                        <div className="text-sm text-gray-500">Confidence: {(item.confidence * 100).toFixed(1)}%</div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-sm font-medium">Product Name</label>
+                          <Input value={item.product_name} onChange={(e) => {
+                            const copy = [...editableQueue];
+                            copy[idx] = { ...copy[idx], product_name: e.target.value };
+                            setEditableQueue(copy);
+                          }} />
+                        </div>
+                        <div>
+                          <label className="text-sm font-medium">Unit</label>
+                          <Input value={item.unit} onChange={(e) => {
+                            const copy = [...editableQueue];
+                            copy[idx] = { ...copy[idx], unit: e.target.value };
+                            setEditableQueue(copy);
+                          }} />
+                        </div>
+                        <div className="md:col-span-2">
+                          <label className="text-sm font-medium">Description</label>
+                          <Textarea value={item.description} onChange={(e) => {
+                            const copy = [...editableQueue];
+                            copy[idx] = { ...copy[idx], description: e.target.value };
+                            setEditableQueue(copy);
+                          }} rows={3} />
+                        </div>
+                        <div>
+                          <label className="text-sm font-medium">Category</label>
+                          <Input value={item.category} onChange={(e) => {
+                            const copy = [...editableQueue];
+                            copy[idx] = { ...copy[idx], category: e.target.value as unknown as import('./types/product').ProductCategory };
+                            setEditableQueue(copy);
+                          }} />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-4 flex justify-end gap-3">
+                  <Button variant="ghost" onClick={() => setShowReviewAll(false)}>Close</Button>
+                  <Button variant="outline" onClick={() => { setEditableQueue(reviewQueue); }}>Reset</Button>
+                  <Button onClick={async () => {
+                    // Save all edited items sequentially to preserve order
+                    for (const it of editableQueue) {
+                      await handleSave(it);
+                    }
+                    // Clear queue and close
+                    setEditableQueue([]);
+                    setReviewQueue([]);
+                    setExtractedData(null);
+                    setShowReviewAll(false);
+                    showAlert('success', `Saved ${editableQueue.length} item(s)`);
+                  }}>Save All</Button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <TabsContent value="review">
             <ProductList
               products={products}
               onExport={handleExport}
               onRemove={handleRemove}
+              onEdit={handleEdit}
             />
           </TabsContent>
+
+          {/* Edit modal for already-saved products */}
+          {editingProduct && (
+            <div className="fixed inset-0 z-50 flex items-start justify-center p-6 bg-black/40">
+              <div className="bg-white rounded-lg w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6">
+                <h3 className="text-lg font-semibold mb-4">Edit Product</h3>
+                <ProductForm
+                  extractedData={editingProduct}
+                  isLoading={isProcessing}
+                  onCancel={() => setEditingProduct(null)}
+                  onSubmit={async (data) => {
+                    await handleSave(data);
+                    setEditingProduct(null);
+                  }}
+                />
+              </div>
+            </div>
+          )}
 
             <TabsContent value="history">
               <HistoryPage 

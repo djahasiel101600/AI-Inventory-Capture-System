@@ -15,6 +15,7 @@ from pathlib import Path
 try:
     # load .env from backend folder if present
     from dotenv import load_dotenv
+    from dotenv import dotenv_values
     load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 except Exception:
     # python-dotenv not installed or .env missing — continue
@@ -31,7 +32,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure--(b9xv05g&pu@&wc#u)6(nz42!$y_d4_m#ca@s^yei+2twi&m0')
 
 # OpenAI API key loaded from environment / backend/.env
+# Load OpenAI key from environment (the .env is loaded above). If not present, read .env explicitly.
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+if not OPENAI_API_KEY:
+    try:
+        env_path = Path(__file__).resolve().parent.parent / '.env'
+        OPENAI_API_KEY = dotenv_values(env_path).get('OPENAI_API_KEY')
+    except Exception:
+        OPENAI_API_KEY = None
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True

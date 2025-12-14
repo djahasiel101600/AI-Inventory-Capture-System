@@ -23,18 +23,55 @@ export function CameraCapture({ onCapture, isProcessing }: CameraCaptureProps) {
 
   const startCamera = async () => {
     try {
+      // Request higher resolution where possible. Note: browsers/devices may ignore these.
       const constraints = {
         video: {
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         }
       };
-      
+
       const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
       setStream(mediaStream);
+
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
+
+        // Wait for metadata so videoWidth/videoHeight are available
+        await new Promise<void>((resolve) => {
+          const onMeta = () => {
+            // Ensure the video plays and fills the container
+            try { videoRef.current?.play(); } catch (e) { /* ignore */ }
+            resolve();
+          };
+          if (videoRef.current?.readyState && videoRef.current.readyState >= 1) {
+            onMeta();
+          } else {
+            videoRef.current?.addEventListener('loadedmetadata', onMeta, { once: true });
+          }
+        });
+
+        // Try to apply constraints to the active video track to request desired resolution.
+        try {
+          const [track] = mediaStream.getVideoTracks();
+          if (track && typeof track.applyConstraints === 'function') {
+            await track.applyConstraints({
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: { ideal: 'environment' }
+            } as any);
+          }
+        } catch (e) {
+          // Non-fatal: some browsers or devices won't allow applying constraints after getUserMedia
+          console.debug('applyConstraints not supported or failed:', e);
+        }
+        // Ensure the element fills the container (inline style override)
+        if (videoRef.current) {
+          videoRef.current.style.width = '100%';
+          videoRef.current.style.height = '100%';
+          videoRef.current.style.objectFit = 'cover';
+        }
       }
     } catch (err) {
       setError('Could not access camera. Please ensure camera permissions are granted.');
@@ -72,7 +109,7 @@ export function CameraCapture({ onCapture, isProcessing }: CameraCaptureProps) {
     <Card className="w-full max-w-2xl mx-auto">
       <CardContent className="p-6">
         <div className="space-y-4">
-          <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
+          <div className="relative bg-black rounded-lg overflow-hidden" style={{ minHeight: 480 }}>
             {stream ? (
               <video
                 ref={videoRef}
@@ -81,7 +118,7 @@ export function CameraCapture({ onCapture, isProcessing }: CameraCaptureProps) {
                 className="w-full h-full object-cover"
               />
             ) : (
-              <div className="flex items-center justify-center h-full text-gray-400">
+              <div className="flex items-center justify-center h-full text-gray-400" style={{ minHeight: 480 }}>
                 {error || 'Initializing camera...'}
               </div>
             )}

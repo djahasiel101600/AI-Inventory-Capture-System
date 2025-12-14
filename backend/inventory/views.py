@@ -48,30 +48,47 @@ class ProductExtractView(APIView):
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
         
         try:
+            # Prefer the smaller vision-capable model (gpt-mini-4) and instruct it
+            # to prioritize visual analysis. Provide OCR text as auxiliary input.
             response = client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-4.1-mini",
                 messages=[
                     {
-                        "role": "user",
+                        "role": "system",
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"""
-                                Analyze the following product image using vision and the provided OCR text.
-                                Extract only these fields and return valid JSON:
+                                                "text": (
+                                                    "You are an assistant with strong visual reasoning. "
+                                                    "Prioritize understanding the image contents when extracting product information. "
+                                                    "Use OCR only as an auxiliary hint if the image text is unclear or partially occluded. "
+                                                    "Return only a valid JSON array of objects (even if there is only one item). "
+                                                    "Each object should contain the requested fields."
+                                                ),
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                                {
+                                    "type": "text",
+                                            "text": f"""
+                                            Analyze the following product image using vision and the provided OCR text.
+                                            Return a JSON array of detected items (even if only one). For each item, include these fields:
                                 
-                                - product_name
-                                - unit (e.g., "500g", "1L", "12pcs")
-                                - description (short text)
-                                - category (Food, Medicine, Drinks, Hygiene, Insecticide, Cleanings, School Supplies, Office Supplies, Tobacco, Alcohol, Bread & Pastries, Baby Products, Pet Supplies, Hardware & Electrical, Clothing & Accessories, Mobile Load & E-Services, Rice & Grains)
-                                - confidence (0 to 1, estimate based on clarity and completeness)
+                                            - product_name
+                                            - unit (e.g., "500g", "1L", "12pcs")
+                                            - description (short text)
+                                            - category (Food, Medicine, Drinks, Hygiene, Insecticide, Cleanings, School Supplies, Office Supplies, Tobacco, Alcohol, Bread & Pastries, Baby Products, Pet Supplies, Hardware & Electrical, Clothing & Accessories, Mobile Load & E-Services, Rice & Grains)
+                                            - confidence (0 to 1, estimate based on clarity and completeness)
                                 
-                                OCR Text: {ocr_text}
+                                            OCR Text: {ocr_text}
                                 
-                                Use the image and OCR together. If uncertain, lower the confidence score.
-                                Return JSON only.
-                                """
-                            },
+                                            Use the image and OCR together. If uncertain, lower the confidence score.
+                                            Return JSON only (an array of objects).
+                                            """
+                                },
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -86,29 +103,154 @@ class ProductExtractView(APIView):
             
             # Parse GPT response
             content = response.choices[0].message.content
-            # Extract JSON from response
-            json_start = content.find('{')
-            json_end = content.rfind('}') + 1
-            json_str = content[json_start:json_end]
-            extracted_data = json.loads(json_str)
-            
-            # Save to database. Use ContentFile to attach the bytes to the ImageField
-            image_name = getattr(image_file, 'name', None) or f'capture_{timezone.now().strftime("%Y%m%d%H%M%S")}.jpg'
-            content_file = ContentFile(image_bytes, name=image_name)
 
-            product_capture = ProductCapture(
-                product_name=extracted_data.get('product_name', ''),
-                unit=extracted_data.get('unit', ''),
-                description=extracted_data.get('description', ''),
-                category=extracted_data.get('category', 'Food'),
-                confidence=extracted_data.get('confidence', 0.0),
-                session_id=session_id
-            )
-            # assign file to image field and save
-            product_capture.image.save(content_file.name, content_file, save=False)
-            product_capture.save()
-            
-            serializer = ProductCaptureSerializer(product_capture)
+            def extract_json_from_text(text: str):
+                """Try several strategies to extract a JSON object/array from text.
+
+                Strategies (in order):
+                - Look for fenced code blocks labelled json (```json ... ```)
+                - Look for any triple-backtick block and attempt parse
+                - Find the first balanced JSON object {...}
+                - Find the first balanced JSON array [...]
+                - Fallback: attempt to locate first '{'..'}' span and parse
+                """
+                # 1) fenced code block with json
+                import re
+
+                # Allow fenced blocks that contain either an object or an array
+                fenced_json = re.search(r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```", text, re.IGNORECASE)
+                if fenced_json:
+                    candidate = fenced_json.group(1)
+                    try:
+                        return json.loads(candidate)
+                    except Exception:
+                        pass
+
+                # 2) any triple-backtick block
+                triple = re.search(r"```([\s\S]*?)```", text)
+                if triple:
+                    c = triple.group(1).strip()
+                    # try as-is
+                    try:
+                        return json.loads(c)
+                    except Exception:
+                        # maybe the block contains other text; try to find braces inside
+                        pass
+
+                # 3) balanced-brace object or array scanning
+                def find_balanced(text, open_ch, close_ch):
+                    start = None
+                    depth = 0
+                    for i, ch in enumerate(text):
+                        if ch == open_ch:
+                            if start is None:
+                                start = i
+                            depth += 1
+                        elif ch == close_ch and start is not None:
+                            depth -= 1
+                            if depth == 0:
+                                return text[start:i+1]
+                    return None
+
+                # Prefer array first, then object (avoids capturing only first object when model returned an array)
+                arr = find_balanced(text, '[', ']')
+                if arr:
+                    try:
+                        return json.loads(arr)
+                    except Exception:
+                        pass
+
+                obj = find_balanced(text, '{', '}')
+                if obj:
+                    try:
+                        return json.loads(obj)
+                    except Exception:
+                        pass
+
+                # 4) Fallback: locate first '{'.. last '}' and attempt
+                s = text.find('{')
+                e = text.rfind('}')
+                if s != -1 and e != -1 and e > s:
+                    candidate = text[s:e+1]
+                    try:
+                        return json.loads(candidate)
+                    except Exception as exc:
+                        raise ValueError(f'Failed to parse JSON from candidate substring: {exc}')
+
+                # Nothing worked
+                raise ValueError('No JSON object or array found in model response')
+
+            try:
+                parsed = extract_json_from_text(content)
+            except Exception as parse_err:
+                # include model content snippet for debugging (trim to reasonable length)
+                snippet = content[:2000] + ('...' if len(content) > 2000 else '')
+                raise ValueError(f'Failed to extract JSON from model response: {parse_err}; response snippet: {snippet}')
+
+            # Normalize to list
+            if isinstance(parsed, dict):
+                items = [parsed]
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ValueError('Parsed model response is neither object nor array')
+
+            # Respect a max_items parameter to limit saves and cost
+            try:
+                max_items = int(request.data.get('max_items', 10))
+            except Exception:
+                max_items = 10
+
+            items = items[:max_items]
+
+            saved_objects = []
+            # Save each detected item as a ProductCapture
+            for idx, it in enumerate(items):
+                # Basic validation and defaults
+                name = it.get('product_name') if isinstance(it, dict) else None
+                unit = it.get('unit') if isinstance(it, dict) else ''
+                desc = it.get('description') if isinstance(it, dict) else ''
+                cat = it.get('category') if isinstance(it, dict) else 'Food'
+                conf = it.get('confidence') if isinstance(it, dict) else 0.0
+
+                if not name:
+                    # skip items without a product_name
+                    continue
+
+                # Create ProductCapture and attach image (same file for each item)
+                timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
+                image_name = f"capture_{timestamp}_{idx}.jpg"
+                content_file = ContentFile(image_bytes, name=image_name)
+
+                product_capture = ProductCapture(
+                    product_name=name,
+                    unit=unit or '',
+                    description=desc or '',
+                    category=cat or 'Food',
+                    confidence=float(conf) if conf is not None else 0.0,
+                    session_id=session_id
+                )
+                product_capture.image.save(content_file.name, content_file, save=False)
+                product_capture.save()
+                saved_objects.append(product_capture)
+
+            serializer = ProductCaptureSerializer(saved_objects, many=True)
+
+            # If debug flag provided in request, include the raw model content and parsed items
+            debug_flag = str(request.data.get('debug', False)).lower() in ('1', 'true', 'yes')
+            if debug_flag:
+                # Return saved objects plus the model's full content and the parsed JSON
+                print({
+                    'saved': serializer.data,
+                    'parsed_items': items,
+                    'model_content': content,
+                })
+                return Response({
+                    'saved': serializer.data,
+                    'parsed_items': items,
+                    'model_content': content,
+                })
+
             return Response(serializer.data)
             
         except Exception as e:
